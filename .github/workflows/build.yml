@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     name: Build
+    if: github.repository == 'sumatrapdfreader/sumatrapdf'
     #runs-on: SumatraBuilder
     runs-on: windows-2025-vs2026
     steps:
@@ -32,6 +33,7 @@ jobs:
 
   ng:
     name: Windows ng x64 release
+    if: github.repository == 'sumatrapdfreader/sumatrapdf'
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

@@ -3219,6 +3219,9 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     PaintKeyboardLinkTargets(win, &gfx);
     PaintKeyboardTextCaret(win, &gfx);
 
+    // Chrome-style find match markers next to / in the vertical scrollbar
+    PaintFindScrollMarkers(win, hdc);
+
     if (!rendering) {
         DebugShowLinks(dm, hdc);
         DebugShowFitContentArea(dm, hdc);

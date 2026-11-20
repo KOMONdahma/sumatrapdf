@@ -55,6 +55,10 @@ struct OverlayScrollbar {
     int dragStartPos = 0;    // nPos when drag started
     bool mouseOverThumb = false;
 
+    // find-match markers, as fractions (0..1) of the scroll range; drawn when thick
+    Vec<float> markers;
+    float markerCurrent = -1.f; // the current match; < 0: none
+
     // repeat-scroll state (for held arrow/track clicks)
     UINT repeatScrollCode = 0;    // SB_LINEUP, SB_PAGEDOWN, etc.; 0 = not repeating
     bool repeatIsInitial = false; // true = waiting for initial delay, false = repeating
@@ -82,3 +86,5 @@ void OverlayScrollbarNotifyScroll(OverlayScrollbar* sb);
 void OverlayScrollbarSetMode(OverlayScrollbar* sb, OverlayScrollbar::Mode mode);
 
 bool IsOverlayScrollbarVisible(OverlayScrollbar* sb);
+
+void OverlayScrollbarSetMarkers(OverlayScrollbar* sb, const Vec<float>& markers, float current);

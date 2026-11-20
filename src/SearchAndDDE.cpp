@@ -7,6 +7,7 @@
 #include "base/UITask.h"
 #include "base/Win.h"
 
+#include "gui/Dpi.h"
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
@@ -839,4 +840,217 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
     }
 
     return FALSE;
+}
+
+// ---- find match markers on the vertical scrollbar (Chrome-style) ----------
+//
+// Every match in win->findMatches is shown as a short line at its position in
+// the document. Native and hidden scrollbars: a narrow lane at the canvas'
+// right edge, next to the scrollbar. Overlay scrollbars: drawn in the bar.
+
+// Chrome's colors: other matches yellow, the current one orange
+constexpr Color kScrollMarkerColor = MkRgb(0xf2, 0xc8, 0x00);
+constexpr Color kScrollMarkerCurColor = MkRgb(0xff, 0x6a, 0x00);
+constexpr Color kScrollMarkerBorderColor = MkRgb(0x80, 0x60, 0x00);
+constexpr int kScrollMarkerLaneDx = 6;
+constexpr int kScrollMarkerDy = 3;
+
+struct FindScrollMarkerPos {
+    int pageNo = 0;
+    RectF rect;
+    u64 key = 0;
+};
+
+// match rects in page coordinates; screen positions depend on zoom and layout,
+// so they are computed on every paint
+struct FindScrollMarkerCache {
+    MainWindow* win = nullptr;
+    DisplayModel* dm = nullptr;
+    void* engine = nullptr;
+    int epoch = -1;
+    int nMatches = -1;
+    u64 firstKey = 0;
+    u64 lastKey = 0;
+    Vec<FindScrollMarkerPos> markers;
+};
+
+static FindScrollMarkerCache gFindScrollMarkerCache;
+
+static u64 FindMatchKeyAt(MainWindow* win, int idx) {
+    const FindMatch& fm = win->findMatches[idx];
+    return MatchKey(fm.startPage, fm.startGlyph);
+}
+
+static void RebuildFindScrollMarkers(MainWindow* win, DisplayModel* dm) {
+    FindScrollMarkerCache& c = gFindScrollMarkerCache;
+    EngineBase* engine = dm->GetEngine();
+    int n = len(win->findMatches);
+    u64 firstKey = n > 0 ? FindMatchKeyAt(win, 0) : 0;
+    u64 lastKey = n > 0 ? FindMatchKeyAt(win, n - 1) : 0;
+    bool same = c.win == win && c.dm == dm && c.engine == (void*)engine && c.epoch == win->findCountEpoch &&
+                c.nMatches == n && c.firstKey == firstKey && c.lastKey == lastKey;
+    if (same) {
+        return;
+    }
+    c.win = win;
+    c.dm = dm;
+    c.engine = (void*)engine;
+    c.epoch = win->findCountEpoch;
+    c.nMatches = n;
+    c.firstKey = firstKey;
+    c.lastKey = lastKey;
+    VecReset(c.markers);
+    if (!engine) {
+        return;
+    }
+    Vec<FindMatchPaintPageRect> rects;
+    for (int i = 0; i < n; i++) {
+        VecReset(rects);
+        AppendMatchPageRects(engine, win->findMatches[i], rects);
+        if (len(rects) == 0) {
+            continue;
+        }
+        FindScrollMarkerPos m;
+        m.pageNo = rects[0].pageNo;
+        m.rect = ToRectF(rects[0].rect);
+        m.key = FindMatchKeyAt(win, i);
+        VecAppend(c.markers, m);
+    }
+}
+
+// position of a match as a fraction (0..1) of the scrollable height; < 0 if
+// it's not part of the scrollable area (e.g. another page in single page mode)
+static float FindScrollMarkerFrac(DisplayModel* dm, const FindScrollMarkerPos& m) {
+    if (!dm->ValidPageNo(m.pageNo)) {
+        return -1.f;
+    }
+    int nPages = dm->PageCount();
+    bool singlePageBar = gSettings->scrollbarInSinglePage && (dm->GetDisplayMode() == DisplayMode::SinglePage);
+    if (singlePageBar) {
+        return ((float)m.pageNo - 0.5f) / (float)std::max(nPages, 1);
+    }
+    if (!dm->PageShown(m.pageNo)) {
+        return -1.f;
+    }
+    PageInfo* pi = dm->GetPageInfo(m.pageNo);
+    if (!pi) {
+        return -1.f;
+    }
+    Size canvas = dm->GetCanvasSize();
+    if (canvas.dy <= 0) {
+        return -1.f;
+    }
+    Rect rc = dm->CvtToScreen(m.pageNo, m.rect);
+    // screen -> canvas (document) coordinates
+    int y = rc.y - pi->pageOnScreen.y + pi->pos.y + (rc.dy / 2);
+    float frac = (float)y / (float)canvas.dy;
+    return std::clamp(frac, 0.f, 1.f);
+}
+
+// returns false if there's nothing to show
+static bool GetFindScrollMarkers(MainWindow* win, Vec<float>& fracs, float* curFrac) {
+    VecReset(fracs);
+    *curFrac = -1.f;
+    if (!win->IsDocLoaded() || !win->AsFixed() || win->InPresentation()) {
+        return false;
+    }
+    if (FindEditTextLen(win) == 0 || !IsFindUIVisible(win) || len(win->findMatches) == 0) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
+    void* engine = (void*)dm->GetEngine();
+    if (win->findCountEngine && win->findCountEngine != engine) {
+        return false;
+    }
+    RebuildFindScrollMarkers(win, dm);
+
+    u64 currentKey = 0;
+    TextSearch* ts = dm->textSearch;
+    if (ts && len(ts->result) > 0) {
+        currentKey = MatchKey(ts->startPage, ts->startGlyph);
+    }
+    for (const FindScrollMarkerPos& m : gFindScrollMarkerCache.markers) {
+        float frac = FindScrollMarkerFrac(dm, m);
+        if (frac < 0) {
+            continue;
+        }
+        if (currentKey != 0 && m.key == currentKey) {
+            *curFrac = frac;
+            continue;
+        }
+        VecAppend(fracs, frac);
+    }
+    return len(fracs) > 0 || *curFrac >= 0;
+}
+
+// vertical extent of the scrollbar's track, in canvas client coordinates
+static void FindScrollMarkerTrack(MainWindow* win, int mode, int* yOut, int* dyOut) {
+    Rect rc = HwndClientRect(win->hwndCanvas);
+    int y = 0;
+    int dy = rc.dy;
+    if (mode == kScrollbarWindows) {
+        SCROLLBARINFO sbi{};
+        sbi.cbSize = sizeof(sbi);
+        bool ok = GetScrollBarInfo(win->hwndCanvas, OBJID_VSCROLL, &sbi) != FALSE;
+        if (ok && !(sbi.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN))) {
+            POINT top{sbi.rcScrollBar.left, sbi.rcScrollBar.top};
+            ScreenToClient(win->hwndCanvas, &top);
+            y = top.y + sbi.dxyLineButton;
+            dy = (sbi.rcScrollBar.bottom - sbi.rcScrollBar.top) - (2 * sbi.dxyLineButton);
+        }
+    } else if (mode == kScrollbarSmart) {
+        // match the track of the thick overlay bar (arrows + gap)
+        int arrow = DpiGetSystemMetrics(SM_CXVSCROLL) + DpiScale(2);
+        y = arrow;
+        dy = rc.dy - (2 * arrow);
+    }
+    *yOut = y;
+    *dyOut = std::max(dy, 1);
+}
+
+static void FillMarker(HDC hdc, Rect r, Color col) {
+    RECT rb = ToRECT(r);
+    HBRUSH br = CreateSolidBrush(kScrollMarkerBorderColor);
+    FillRect(hdc, &rb, br);
+    DeleteObject(br);
+    r.Inflate(-1, -1);
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    RECT ri = ToRECT(r);
+    br = CreateSolidBrush(col);
+    FillRect(hdc, &ri, br);
+    DeleteObject(br);
+}
+
+void PaintFindScrollMarkers(MainWindow* win, HDC hdc) {
+    Vec<float> fracs;
+    float curFrac = -1.f;
+    bool show = GetFindScrollMarkers(win, fracs, &curFrac);
+    if (win->overlayScrollV) {
+        OverlayScrollbarSetMarkers(win->overlayScrollV, fracs, show ? curFrac : -1.f);
+    }
+    int mode = ScrollbarModeFromPrefs();
+    // the always-visible overlay bar draws the markers itself
+    if (!show || mode == kScrollbarOverlay) {
+        return;
+    }
+    Rect rc = HwndClientRect(win->hwndCanvas);
+    int trackY = 0;
+    int trackDy = 0;
+    FindScrollMarkerTrack(win, mode, &trackY, &trackDy);
+    int dx = DpiScale(kScrollMarkerLaneDx);
+    int dy = std::max(DpiScale(kScrollMarkerDy), 3);
+    int x = rc.x + rc.dx - dx;
+    auto markerRect = [&](float frac) {
+        int y = trackY + (int)(frac * (float)trackDy) - (dy / 2);
+        y = std::clamp(y, trackY, std::max(trackY, trackY + trackDy - dy));
+        return Rect(x, y, dx, dy);
+    };
+    for (float frac : fracs) {
+        FillMarker(hdc, markerRect(frac), kScrollMarkerColor);
+    }
+    if (curFrac >= 0) {
+        FillMarker(hdc, markerRect(curFrac), kScrollMarkerCurColor);
+    }
 }

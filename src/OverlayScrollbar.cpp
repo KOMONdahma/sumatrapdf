@@ -107,6 +107,33 @@ static bool MouseOverOwnerSurface(OverlayScrollbar* sb, Point pt) {
     return true;
 }
 
+// Chrome's colors: other find matches yellow, the current one orange
+constexpr Color kMarkerColor = MkRgb(0xf2, 0xc8, 0x00);
+constexpr Color kMarkerCurColor = MkRgb(0xff, 0x6a, 0x00);
+constexpr int kMarkerDy = 3;
+
+// find-match markers over the track (and the thumb, like Chrome)
+template <typename FillFn>
+static void PaintMarkers(OverlayScrollbar* sb, FillFn& fillRect) {
+    if (len(sb->markers) == 0 && sb->markerCurrent < 0) {
+        return;
+    }
+    Rect track = GetTrackRect(sb);
+    int dy = std::max(DpiScale(kMarkerDy), 3);
+    int inset = DpiScale(2);
+    auto markerRect = [&](float frac) {
+        int y = track.y + (int)(frac * (float)track.dy) - (dy / 2);
+        y = std::clamp(y, track.y, std::max(track.y, track.y + track.dy - dy));
+        return Rect(track.x + inset, y, std::max(track.dx - (2 * inset), 1), dy);
+    };
+    for (float frac : sb->markers) {
+        fillRect(markerRect(frac), kMarkerColor, (u8)255);
+    }
+    if (sb->markerCurrent >= 0) {
+        fillRect(markerRect(sb->markerCurrent), kMarkerCurColor, (u8)255);
+    }
+}
+
 // Update the layered window with the current appearance
 static void PaintScrollbar(OverlayScrollbar* sb) {
     if (!sb->hwnd || !HwndIsVisible(sb->hwnd)) {
@@ -156,8 +183,8 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
         alpha = IsCurrentThemeDefault() ? kAlphaThick : 255;
     }
 
-    auto fillRect = [&](Rect r, Color color) {
-        DWORD pixel = PremultiplyPixel(color, alpha);
+    auto fillRectA = [&](Rect r, Color color, u8 a) {
+        DWORD pixel = PremultiplyPixel(color, a);
         DWORD* pixels = (DWORD*)bits;
         int x0 = std::max(r.x, 0);
         int y0 = std::max(r.y, 0);
@@ -169,6 +196,7 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
             }
         }
     };
+    auto fillRect = [&](Rect r, Color color) { fillRectA(r, color, alpha); };
 
     if (IsThick(sb)) {
         fillRect(Rect(0, 0, w, h), ThemeTrackColor());
@@ -188,6 +216,10 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
         }
     }
     fillRect(thumbRc, thumbCol);
+
+    if (IsThick(sb) && IsVert(sb)) {
+        PaintMarkers(sb, fillRectA);
+    }
 
     if (IsThick(sb)) {
         Gdiplus::Graphics gfx(hdcMem);
@@ -896,4 +928,33 @@ void OverlayScrollbarShow(OverlayScrollbar* sb, bool show) {
     OverlayScrollbarUpdatePos(sb);
     ShowScrollbarHwnd(sb);
     PaintScrollbar(sb);
+}
+
+static bool SameMarkers(const Vec<float>& a, const Vec<float>& b) {
+    if (len(a) != len(b)) {
+        return false;
+    }
+    for (int i = 0; i < len(a); i++) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void OverlayScrollbarSetMarkers(OverlayScrollbar* sb, const Vec<float>& markers, float current) {
+    if (!sb || !IsVert(sb)) {
+        return;
+    }
+    if (sb->markerCurrent == current && SameMarkers(sb->markers, markers)) {
+        return;
+    }
+    VecReset(sb->markers);
+    for (float frac : markers) {
+        VecAppend(sb->markers, frac);
+    }
+    sb->markerCurrent = current;
+    if (IsThick(sb)) {
+        PaintScrollbar(sb);
+    }
 }

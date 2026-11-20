@@ -64,6 +64,7 @@ bool FindFlashStep(MainWindow* win);
 TempStr LinkDestHighlightResultTemp(int* exitCodeOut);
 void PaintAllFindMatches(MainWindow* win, Gfx* gfx);
 void InvalidateFindMatchPaintCache();
+void PaintFindScrollMarkers(MainWindow* win, HDC hdc);
 
 void FindPrev(MainWindow* win);
 void FindNext(MainWindow* win);
